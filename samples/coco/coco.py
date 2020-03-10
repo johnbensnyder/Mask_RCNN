@@ -11,6 +11,14 @@ Written by Waleed Abdulla
 Usage: import the module (see Jupyter notebooks for examples), or run from
        the command line as such:
 
+mpirun -np 4 -H localhost:4 --bind-to none \
+--allow-run-as-root \
+python3 coco.py train --dataset=/workspace/shared_workspace/data/coco/ \
+--model=imagenet --year=2017
+
+python3 coco.py train --dataset=/workspace/shared_workspace/data/coco/ \
+--model=imagenet --year=2017
+
     # Train a new model starting from pre-trained COCO weights
     python3 coco.py train --dataset=/path/to/coco/ --model=coco
 
@@ -52,6 +60,7 @@ ROOT_DIR = os.path.abspath("../../")
 
 # Import Mask RCNN
 sys.path.append(ROOT_DIR)  # To find local version of the library
+sys.path.append('/workspace/shared_workspace/Mask_RCNN/')
 from mrcnn.config import Config
 from mrcnn import model as modellib, utils
 

@@ -22,6 +22,7 @@ import tensorflow.keras.layers as KE
 import tensorflow.keras.utils as KU
 from tensorflow.python.eager import context
 import tensorflow.keras.models as KM
+import horovod.tensorflow.keras as hvd
 
 from mrcnn import utils
 
@@ -29,7 +30,16 @@ from mrcnn import utils
 from distutils.version import LooseVersion
 assert LooseVersion(tf.__version__) >= LooseVersion("2.0")
 
+hvd.init()
 tf.compat.v1.disable_eager_execution()
+tf.config.optimizer.set_jit(True)
+tf.config.optimizer.set_experimental_options({"auto_mixed_precision": True})
+
+gpus = tf.config.experimental.list_physical_devices('GPU')
+for gpu in gpus:
+    tf.config.experimental.set_memory_growth(gpu, True)
+if gpus:
+    tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
 
 ############################################################
 #  Utility Functions
@@ -1934,7 +1944,8 @@ class MaskRCNN(object):
             # TODO: can this be optimized to avoid duplicating the anchors?
             anchors = np.broadcast_to(anchors, (config.BATCH_SIZE,) + anchors.shape)
             # A hack to get around Keras's bad support for constants
-            anchors = KL.Lambda(lambda x: tf.Variable(anchors), name="anchors")(input_image)
+            # anchors = KL.Lambda(lambda x: tf.Variable(anchors), name="anchors")(input_image)
+            anchors = tf.constant(anchors, name="anchors")
         else:
             anchors = input_anchors
 
@@ -2135,7 +2146,8 @@ class MaskRCNN(object):
         """Downloads ImageNet trained weights from Keras.
         Returns path to weights file.
         """
-        from keras.utils.data_utils import get_file
+        # from keras.utils.data_utils import get_file
+        from tensorflow.keras.utils import get_file
         TF_WEIGHTS_PATH_NO_TOP = 'https://github.com/fchollet/deep-learning-models/'\
                                  'releases/download/v0.2/'\
                                  'resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5'
@@ -2153,6 +2165,10 @@ class MaskRCNN(object):
         optimizer = keras.optimizers.SGD(
             lr=learning_rate, momentum=momentum,
             clipnorm=self.config.GRADIENT_CLIP_NORM)
+        '''optimizer = keras.optimizers.SGD(
+            lr=learning_rate, momentum=momentum)
+        optimizer = tf.keras.mixed_precision.experimental.LossScaleOptimizer(optimizer, "dynamic")'''
+        optimizer = hvd.DistributedOptimizer(optimizer)
         # Add Losses
         loss_names = [
             "rpn_class_loss",  "rpn_bbox_loss",
@@ -2326,13 +2342,17 @@ class MaskRCNN(object):
             os.makedirs(self.log_dir)
 
         # Callbacks
-        callbacks = [
-            keras.callbacks.TensorBoard(log_dir=self.log_dir,
-                                        histogram_freq=0, write_graph=True, write_images=False),
-            keras.callbacks.ModelCheckpoint(self.checkpoint_path,
-                                            verbose=0, save_weights_only=True),
+        callbacks = [hvd.callbacks.BroadcastGlobalVariablesCallback(0),
+                     hvd.callbacks.MetricAverageCallback(),
+                     hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=3, verbose=1)
         ]
-
+        
+        if hvd.rank()==0:
+            callbacks.append(keras.callbacks.TensorBoard(log_dir=self.log_dir,
+                                        histogram_freq=0, write_graph=True, write_images=False))
+            callbacks.append(keras.callbacks.ModelCheckpoint(self.checkpoint_path,
+                                            verbose=0, save_weights_only=True))
+        
         # Add custom callbacks to the list
         if custom_callbacks:
             callbacks += custom_callbacks
@@ -2362,6 +2382,7 @@ class MaskRCNN(object):
             max_queue_size=100,
             workers=workers,
             use_multiprocessing=workers > 1,
+            verbose=int(hvd.rank()==0)
         )
         self.epoch = max(self.epoch, epochs)
 
